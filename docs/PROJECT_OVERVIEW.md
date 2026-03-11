@@ -23,6 +23,7 @@
 │   ├── PROJECT_OVERVIEW.md
 │   ├── REQUIREMENTS_TRACEABILITY.md
 │   ├── TESTING.md
+│   ├── THEORY_AND_CODE_MAPPING.md
 │   └── USER_GUIDE.md
 └── README.md
 ```

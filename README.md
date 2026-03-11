@@ -119,3 +119,4 @@ python3 -m unittest discover -s tests -v
 - [Тестирование](docs/TESTING.md)
 - [Соответствие требованиям контрольной точки](docs/REQUIREMENTS_TRACEABILITY.md)
 - [FAQ и диагностика проблем](docs/FAQ.md)
+- [Теория вычислений с привязкой к коду](docs/THEORY_AND_CODE_MAPPING.md)
