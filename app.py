@@ -1,4 +1,5 @@
 import ast
+import colorsys
 import os
 import random
 import tkinter as tk
@@ -80,6 +81,60 @@ def hex_to_rgb(value: str):
     if len(value) != 6:
         raise MatrixError("Цвет должен быть в формате #RRGGBB")
     return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def normalize_rgb(value):
+    if isinstance(value, tuple):
+        return tuple(int(channel) for channel in value[:3])
+    if isinstance(value, str):
+        return hex_to_rgb(value)
+    raise MatrixError("Не удалось прочитать цвет пикселя")
+
+
+def clamp_color_channel(value: float) -> int:
+    return max(0, min(255, round(value)))
+
+
+def clamp_unit(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def color_distance(a, b) -> float:
+    return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
+
+
+def recolor_pixel(pixel_rgb, target_rgb, replacement_rgb, preserve_shades=True):
+    if not preserve_shades:
+        return replacement_rgb
+
+    pixel_h, pixel_l, pixel_s = colorsys.rgb_to_hls(*(channel / 255 for channel in pixel_rgb))
+    target_h, target_l, target_s = colorsys.rgb_to_hls(*(channel / 255 for channel in target_rgb))
+    replacement_h, replacement_l, replacement_s = colorsys.rgb_to_hls(*(channel / 255 for channel in replacement_rgb))
+
+    shaded_l = clamp_unit(replacement_l + (pixel_l - target_l))
+    shaded_s = clamp_unit(replacement_s * (pixel_s / target_s)) if target_s > 1e-9 else pixel_s
+    red, green, blue = colorsys.hls_to_rgb(replacement_h, shaded_l, shaded_s)
+    return tuple(clamp_color_channel(channel * 255) for channel in (red, green, blue))
+
+
+def scaled_photo_image(source: tk.PhotoImage, scale: float) -> tk.PhotoImage:
+    scale = max(scale, 0.01)
+    source_width = source.width()
+    source_height = source.height()
+    target_width = max(1, int(source_width * scale))
+    target_height = max(1, int(source_height * scale))
+    if target_width == source_width and target_height == source_height:
+        return source
+
+    image = tk.PhotoImage(width=target_width, height=target_height)
+    for target_y in range(target_height):
+        source_y = min(source_height - 1, int(target_y / scale))
+        row = []
+        for target_x in range(target_width):
+            source_x = min(source_width - 1, int(target_x / scale))
+            row.append(rgb_to_hex(normalize_rgb(source.get(source_x, source_y))))
+        image.put("{" + " ".join(row) + "}", to=(0, target_y))
+    return image
 
 
 class CalculatorUI(tk.Tk):
@@ -180,7 +235,7 @@ class CalculatorUI(tk.Tk):
         ).pack(anchor="w", pady=(0, 8))
         ttk.Label(
             self.lab_tab,
-            text="Загрузите PNG/GIF/PPM, выберите исходный и новый цвет, задайте допуск и сохраните результат.",
+            text="Загрузите PNG/GIF/PPM, выберите цвет палитрой или настоящей пипеткой по изображению, задайте допуск и сохраните результат.",
         ).pack(anchor="w")
 
         controls = ttk.LabelFrame(self.lab_tab, text="Настройки обработки")
@@ -189,34 +244,70 @@ class CalculatorUI(tk.Tk):
         self.target_color = tk.StringVar(value="#ff0000")
         self.replace_color = tk.StringVar(value="#2f80ed")
         self.tolerance = tk.IntVar(value=45)
+        self.preserve_shades = tk.BooleanVar(value=True)
         self.replaced_pixels = tk.StringVar(value="Заменено пикселей: 0")
+        self.preview_status = tk.StringVar(value="Масштаб: по размеру окна. Пипетка работает по исходной и текущей картинке.")
+        self.preview_zoom = tk.StringVar(value="fit")
+        self.pipette_enabled = False
+        self.original_display_image = None
+        self.processed_display_image = None
+        self.preview_scales = {"original": 1.0, "processed": 1.0}
+        self.image_history = []
+        self.image_history_index = -1
 
         ttk.Button(controls, text="Открыть изображение", command=self.open_image).grid(row=0, column=0, padx=4, pady=4, sticky="ew")
-        ttk.Label(controls, textvariable=self.image_path).grid(row=0, column=1, columnspan=5, sticky="w")
+        ttk.Label(controls, textvariable=self.image_path).grid(row=0, column=1, columnspan=8, sticky="w")
         ttk.Label(controls, text="Целевой цвет:").grid(row=1, column=0, sticky="w", padx=4)
         ttk.Entry(controls, textvariable=self.target_color, width=10).grid(row=1, column=1, sticky="w")
-        ttk.Button(controls, text="Пипетка/палитра", command=lambda: self.pick_color(self.target_color)).grid(row=1, column=2, padx=4)
-        ttk.Label(controls, text="Новый цвет:").grid(row=1, column=3, sticky="w", padx=4)
-        ttk.Entry(controls, textvariable=self.replace_color, width=10).grid(row=1, column=4, sticky="w")
-        ttk.Button(controls, text="Палитра", command=lambda: self.pick_color(self.replace_color)).grid(row=1, column=5, padx=4)
+        ttk.Button(controls, text="Палитра", command=lambda: self.pick_color(self.target_color)).grid(row=1, column=2, padx=4)
+        ttk.Button(controls, text="Пипетка", command=self.enable_pipette).grid(row=1, column=3, padx=4)
+        ttk.Label(controls, text="Новый цвет:").grid(row=1, column=4, sticky="w", padx=4)
+        ttk.Entry(controls, textvariable=self.replace_color, width=10).grid(row=1, column=5, sticky="w")
+        ttk.Button(controls, text="Палитра", command=lambda: self.pick_color(self.replace_color)).grid(row=1, column=6, padx=4)
         ttk.Label(controls, text="Допуск:").grid(row=2, column=0, sticky="w", padx=4)
-        ttk.Scale(controls, from_=0, to=255, variable=self.tolerance, orient="horizontal").grid(row=2, column=1, columnspan=3, sticky="ew")
-        ttk.Label(controls, textvariable=self.replaced_pixels).grid(row=2, column=4, sticky="w", padx=4)
+        ttk.Scale(controls, from_=0, to=255, variable=self.tolerance, orient="horizontal").grid(row=2, column=1, columnspan=4, sticky="ew")
+        ttk.Label(controls, textvariable=self.replaced_pixels).grid(row=2, column=5, columnspan=2, sticky="w", padx=4)
+        ttk.Checkbutton(controls, text="Сохранять оттенки", variable=self.preserve_shades).grid(row=2, column=7, columnspan=2, sticky="w", padx=4)
         ttk.Button(controls, text="Заменить цвет", command=self.replace_image_color, style="Accent.TButton").grid(row=3, column=0, padx=4, pady=4, sticky="ew")
-        ttk.Button(controls, text="Сохранить результат", command=self.save_processed_image).grid(row=3, column=1, padx=4, pady=4, sticky="ew")
-        ttk.Button(controls, text="Создать демо-картинку", command=self.create_demo_image).grid(row=3, column=2, padx=4, pady=4, sticky="ew")
-        for col in range(6):
+        self.undo_button = ttk.Button(controls, text="↶ Отменить", command=self.undo_image_change)
+        self.undo_button.grid(row=3, column=1, padx=4, pady=4, sticky="ew")
+        self.redo_button = ttk.Button(controls, text="↷ Вернуть", command=self.redo_image_change)
+        self.redo_button.grid(row=3, column=2, padx=4, pady=4, sticky="ew")
+        ttk.Button(controls, text="Сохранить результат", command=self.save_processed_image).grid(row=3, column=3, padx=4, pady=4, sticky="ew")
+        ttk.Button(controls, text="Создать демо-картинку", command=self.create_demo_image).grid(row=3, column=4, padx=4, pady=4, sticky="ew")
+        ttk.Button(controls, text="Вписать в окно", command=self.fit_previews).grid(row=3, column=5, padx=4, pady=4, sticky="ew")
+        ttk.Button(controls, text="100% + прокрутка", command=self.show_previews_full_size).grid(row=3, column=6, padx=4, pady=4, sticky="ew")
+        ttk.Button(controls, text="−", command=lambda: self.change_preview_zoom(0.8)).grid(row=3, column=7, padx=4, pady=4, sticky="ew")
+        ttk.Button(controls, text="+", command=lambda: self.change_preview_zoom(1.25)).grid(row=3, column=8, padx=4, pady=4, sticky="ew")
+        ttk.Label(controls, textvariable=self.preview_status).grid(row=4, column=0, columnspan=9, sticky="w", padx=4, pady=(0, 4))
+        for col in range(9):
             controls.grid_columnconfigure(col, weight=1)
 
-        preview = ttk.Frame(self.lab_tab)
+        preview = ttk.PanedWindow(self.lab_tab, orient="horizontal")
         preview.pack(fill="both", expand=True)
-        self.original_label = ttk.Label(preview, text="Исходное изображение", anchor="center")
-        self.processed_label = ttk.Label(preview, text="Результат", anchor="center")
-        self.original_label.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.processed_label.pack(side="left", fill="both", expand=True, padx=(5, 0))
+        self.original_canvas = self._make_image_view(preview, "Исходное изображение")
+        self.processed_canvas = self._make_image_view(preview, "Результат")
+        self.original_canvas.bind("<Button-1>", lambda event: self.pick_color_from_preview(event, self.original_image, self.original_canvas, "original", "исходной картинке"))
+        self.processed_canvas.bind("<Button-1>", lambda event: self.pick_color_from_preview(event, self.processed_image, self.processed_canvas, "processed", "текущем результате"))
+        self.original_canvas.bind("<Configure>", lambda event: self._refresh_previews())
+        self.processed_canvas.bind("<Configure>", lambda event: self._refresh_previews())
         self.original_image = None
         self.processed_image = None
         self.create_demo_image()
+
+    def _make_image_view(self, parent, title):
+        frame = ttk.LabelFrame(parent, text=title)
+        parent.add(frame, weight=1)
+        canvas = tk.Canvas(frame, bg="#111827", highlightthickness=0)
+        x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=canvas.xview)
+        y_scroll = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+        return canvas
 
     def _build_theory_tab(self):
         ttk.Label(self.theory_tab, text="Мини-тренажёр по теме «Прямая и плоскость»", font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
@@ -349,6 +440,32 @@ class CalculatorUI(tk.Tk):
         if color:
             variable.set(color)
 
+    def enable_pipette(self):
+        if self.original_image is None and self.processed_image is None:
+            messagebox.showwarning("Нет изображения", "Сначала откройте или создайте изображение.")
+            return
+        self.pipette_enabled = True
+        self.original_canvas.configure(cursor="crosshair")
+        self.processed_canvas.configure(cursor="crosshair")
+        self.preview_status.set("Пипетка активна: кликните по пикселю на исходной картинке или текущем результате.")
+
+    def fit_previews(self):
+        self.preview_zoom.set("fit")
+        self._refresh_previews()
+
+    def show_previews_full_size(self):
+        self.preview_zoom.set("1.0")
+        self._refresh_previews()
+
+    def change_preview_zoom(self, factor):
+        if self.preview_zoom.get() == "fit":
+            current = self.preview_scales.get("original", 1.0)
+        else:
+            current = float(self.preview_zoom.get())
+        next_zoom = min(4.0, max(0.05, current * factor))
+        self.preview_zoom.set(str(next_zoom))
+        self._refresh_previews()
+
     def create_demo_image(self):
         image = tk.PhotoImage(width=260, height=180)
         for y in range(180):
@@ -359,8 +476,10 @@ class CalculatorUI(tk.Tk):
                 image.put(color, (x, y))
         self.original_image = image
         self.processed_image = image.copy()
+        self._reset_image_history()
         self.image_path.set("Демо-картинка создана внутри приложения")
-        self._refresh_previews()
+        self.replaced_pixels.set("Заменено пикселей: 0")
+        self.fit_previews()
 
     def open_image(self):
         path = filedialog.askopenfilename(
@@ -376,30 +495,44 @@ class CalculatorUI(tk.Tk):
             return
         self.original_image = image
         self.processed_image = image.copy()
-        self.image_path.set(os.path.basename(path))
-        self._refresh_previews()
+        self._reset_image_history()
+        self.image_path.set(f"{os.path.basename(path)} ({image.width()}×{image.height()})")
+        self.replaced_pixels.set("Заменено пикселей: 0")
+        self.fit_previews()
 
     def replace_image_color(self):
-        if self.original_image is None:
+        if self.processed_image is None:
             messagebox.showwarning("Нет изображения", "Сначала откройте изображение.")
             return
         try:
             target = hex_to_rgb(self.target_color.get())
-            replacement = rgb_to_hex(hex_to_rgb(self.replace_color.get()))
+            replacement = hex_to_rgb(self.replace_color.get())
         except Exception as exc:
             messagebox.showerror("Ошибка цвета", str(exc))
             return
+
         tolerance = self.tolerance.get()
-        result = self.original_image.copy()
+        source = self.processed_image
+        result = source.copy()
         changed = 0
         for y in range(result.height()):
             for x in range(result.width()):
-                rgb = self.original_image.get(x, y)
-                if sum((rgb[i] - target[i]) ** 2 for i in range(3)) ** 0.5 <= tolerance:
-                    result.put(replacement, (x, y))
+                rgb = normalize_rgb(source.get(x, y))
+                if color_distance(rgb, target) <= tolerance:
+                    new_rgb = recolor_pixel(rgb, target, replacement, self.preserve_shades.get())
+                    result.put(rgb_to_hex(new_rgb), (x, y))
                     changed += 1
+
+        if changed == 0:
+            self.replaced_pixels.set("Заменено пикселей: 0")
+            self.preview_status.set("Подходящие пиксели не найдены. Попробуйте увеличить допуск или выбрать цвет пипеткой.")
+            return
+
         self.processed_image = result
+        self._push_image_history(result)
+        shade_text = "с сохранением оттенков" if self.preserve_shades.get() else "сплошным цветом"
         self.replaced_pixels.set(f"Заменено пикселей: {changed}")
+        self.preview_status.set(f"Изменение применено к текущей версии картинки: {changed} пикс., {shade_text}.")
         self._refresh_previews()
 
     def save_processed_image(self):
@@ -420,9 +553,90 @@ class CalculatorUI(tk.Tk):
             return
         messagebox.showinfo("Готово", f"Результат сохранён:\n{path}")
 
+    def _reset_image_history(self):
+        self.image_history = [self.processed_image.copy()] if self.processed_image is not None else []
+        self.image_history_index = 0 if self.image_history else -1
+        self._update_history_buttons()
+
+    def _push_image_history(self, image):
+        self.image_history = self.image_history[: self.image_history_index + 1]
+        self.image_history.append(image.copy())
+        self.image_history_index = len(self.image_history) - 1
+        self._update_history_buttons()
+
+    def _update_history_buttons(self):
+        if not hasattr(self, "undo_button"):
+            return
+        self.undo_button.configure(state="normal" if self.image_history_index > 0 else "disabled")
+        self.redo_button.configure(state="normal" if self.image_history_index < len(self.image_history) - 1 else "disabled")
+
+    def undo_image_change(self):
+        if self.image_history_index <= 0:
+            return
+        self.image_history_index -= 1
+        self.processed_image = self.image_history[self.image_history_index].copy()
+        self._update_history_buttons()
+        self.preview_status.set(f"Отмена: показана версия {self.image_history_index + 1} из {len(self.image_history)}.")
+        self._refresh_previews()
+
+    def redo_image_change(self):
+        if self.image_history_index >= len(self.image_history) - 1:
+            return
+        self.image_history_index += 1
+        self.processed_image = self.image_history[self.image_history_index].copy()
+        self._update_history_buttons()
+        self.preview_status.set(f"Возврат: показана версия {self.image_history_index + 1} из {len(self.image_history)}.")
+        self._refresh_previews()
+
+    def pick_color_from_preview(self, event, image, canvas, scale_key, source_name):
+        if not self.pipette_enabled or image is None:
+            return
+        scale = self.preview_scales.get(scale_key, 1.0)
+        canvas_x = canvas.canvasx(event.x)
+        canvas_y = canvas.canvasy(event.y)
+        source_x = int(canvas_x / scale)
+        source_y = int(canvas_y / scale)
+        if not (0 <= source_x < image.width() and 0 <= source_y < image.height()):
+            return
+        color = rgb_to_hex(normalize_rgb(image.get(source_x, source_y)))
+        self.target_color.set(color)
+        self.pipette_enabled = False
+        self.original_canvas.configure(cursor="")
+        self.processed_canvas.configure(cursor="")
+        self.preview_status.set(f"Пипетка выбрала цвет {color} в точке ({source_x}, {source_y}) на {source_name}.")
+
+    def _preview_scale_for(self, image, canvas):
+        if image is None:
+            return 1.0
+        zoom = self.preview_zoom.get()
+        if zoom != "fit":
+            return float(zoom)
+        canvas_width = max(1, canvas.winfo_width() - 8)
+        canvas_height = max(1, canvas.winfo_height() - 8)
+        if canvas_width <= 1 or canvas_height <= 1:
+            return 1.0
+        return min(1.0, canvas_width / image.width(), canvas_height / image.height())
+
+    def _draw_preview(self, canvas, image, attr_name, scale_key, title):
+        canvas.delete("all")
+        if image is None:
+            canvas.configure(scrollregion=(0, 0, 1, 1))
+            return
+        scale = self._preview_scale_for(image, canvas)
+        display = scaled_photo_image(image, scale)
+        setattr(self, attr_name, display)
+        canvas.create_image(0, 0, anchor="nw", image=display)
+        canvas.configure(scrollregion=(0, 0, display.width(), display.height()))
+        self.preview_scales[scale_key] = scale
+        if scale_key == "original":
+            mode = "вписано в окно" if self.preview_zoom.get() == "fit" else f"{scale * 100:.0f}%"
+            self.preview_status.set(f"{title}: {image.width()}×{image.height()}, показ: {mode}. В режиме 100% доступны полосы прокрутки.")
+
     def _refresh_previews(self):
-        self.original_label.configure(image=self.original_image, compound="top", text="Исходное изображение")
-        self.processed_label.configure(image=self.processed_image, compound="top", text="Результат")
+        if not hasattr(self, "original_canvas"):
+            return
+        self._draw_preview(self.original_canvas, self.original_image, "original_display_image", "original", "Исходное изображение")
+        self._draw_preview(self.processed_canvas, self.processed_image, "processed_display_image", "processed", "Результат")
 
     def random_theory_card(self):
         title, body = random.choice(THEORY_CARDS)
