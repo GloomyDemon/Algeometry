@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 
 class MatrixError(ValueError):
-    """Ошибка операций над матрицами."""
+    """Ошибка операций над матрицами и векторами."""
 
 
 Matrix = List[List[float]]
@@ -25,6 +25,25 @@ def _shape(matrix: Matrix) -> Tuple[int, int]:
     if any(len(row) != cols for row in matrix):
         raise MatrixError("У матрицы разные длины строк")
     return len(matrix), cols
+
+
+def _vector_size(vector: Vector) -> int:
+    if not vector:
+        raise MatrixError("Вектор не должен быть пустым")
+    return len(vector)
+
+
+def _require_same_vector_size(a: Vector, b: Vector) -> int:
+    size_a = _vector_size(a)
+    size_b = _vector_size(b)
+    if size_a != size_b:
+        raise MatrixError("Операция невозможна: векторы имеют разную размерность")
+    return size_a
+
+
+def _require_3d(vector: Vector, name: str) -> None:
+    if _vector_size(vector) != 3:
+        raise MatrixError(f"{name} должен быть трёхмерным вектором")
 
 
 def _copy(matrix: Matrix) -> Matrix:
@@ -139,6 +158,59 @@ def rank(a: Matrix) -> CalculationResult:
     return CalculationResult(steps=steps, result=r)
 
 
+def add_vectors(a: Vector, b: Vector) -> CalculationResult:
+    size = _require_same_vector_size(a, b)
+    result = [a[i] + b[i] for i in range(size)]
+    return CalculationResult([f"Проверка размерности: {size}", "Складываем координаты векторов"], result)
+
+
+def subtract_vectors(a: Vector, b: Vector) -> CalculationResult:
+    size = _require_same_vector_size(a, b)
+    result = [a[i] - b[i] for i in range(size)]
+    return CalculationResult([f"Проверка размерности: {size}", "Вычитаем координаты векторов"], result)
+
+
+def multiply_vector_by_scalar(vector: Vector, scalar: float) -> CalculationResult:
+    size = _vector_size(vector)
+    result = [scalar * value for value in vector]
+    return CalculationResult([f"Вектор размерности {size}", f"Умножаем каждую координату на {scalar}"], result)
+
+
+def dot_product(a: Vector, b: Vector) -> CalculationResult:
+    size = _require_same_vector_size(a, b)
+    products = [a[i] * b[i] for i in range(size)]
+    return CalculationResult(
+        [f"Проверка размерности: {size}", f"Скалярное произведение = {' + '.join(f'{p:.4g}' for p in products)}"],
+        sum(products),
+    )
+
+
+def cross_product(a: Vector, b: Vector) -> CalculationResult:
+    _require_3d(a, "Первый множитель")
+    _require_3d(b, "Второй множитель")
+    result = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+    return CalculationResult(
+        ["Векторное произведение определено для 3D-векторов", "Вычисляем координаты через миноры определителя"],
+        result,
+    )
+
+
+def mixed_product(a: Vector, b: Vector, c: Vector) -> CalculationResult:
+    _require_3d(a, "Первый вектор")
+    _require_3d(b, "Второй вектор")
+    _require_3d(c, "Третий вектор")
+    cross = cross_product(b, c).result
+    value = sum(a[i] * cross[i] for i in range(3))
+    return CalculationResult(
+        ["Смешанное произведение [a,b,c] = a · (b × c)", f"b × c = {cross}", f"a · (b × c) = {value:.6g}"],
+        value,
+    )
+
+
 def solve_slae_matrix_method(a: Matrix, b: Vector) -> CalculationResult:
     n, m = _shape(a)
     if n != m:
@@ -151,30 +223,9 @@ def solve_slae_matrix_method(a: Matrix, b: Vector) -> CalculationResult:
     inverse = _inverse(a)
     x = [sum(inverse[i][j] * b[j] for j in range(n)) for i in range(n)]
     return CalculationResult(
-        steps=det_a.steps + ["det(A) != 0, находим A^-1", "x = A^-1 * b"],
+        steps=["Проверяем det(A) != 0", f"det(A)={det_a.result:.6g}", "Находим обратную матрицу A^-1", "Умножаем A^-1 на b"],
         result=x,
     )
-
-
-def _inverse(a: Matrix) -> Matrix:
-    n, m = _shape(a)
-    if n != m:
-        raise MatrixError("Обратимая матрица должна быть квадратной")
-    mat = [row[:] + [1.0 if i == j else 0.0 for j in range(n)] for i, row in enumerate(_copy(a))]
-    for col in range(n):
-        pivot = max(range(col, n), key=lambda r: abs(mat[r][col]))
-        if abs(mat[pivot][col]) < 1e-12:
-            raise MatrixError("Матрица вырожденная, обратной не существует")
-        mat[col], mat[pivot] = mat[pivot], mat[col]
-        pivot_val = mat[col][col]
-        for j in range(2 * n):
-            mat[col][j] /= pivot_val
-        for i in range(n):
-            if i != col:
-                factor = mat[i][col]
-                for j in range(2 * n):
-                    mat[i][j] -= factor * mat[col][j]
-    return [row[n:] for row in mat]
 
 
 def solve_slae_cramer(a: Matrix, b: Vector) -> CalculationResult:
@@ -185,17 +236,17 @@ def solve_slae_cramer(a: Matrix, b: Vector) -> CalculationResult:
         raise MatrixError("Размер вектора b не совпадает с размером матрицы")
     det_a = determinant(a).result
     if abs(det_a) < 1e-12:
-        raise MatrixError("Метод Крамера неприменим: det(A)=0")
+        raise MatrixError("Метод Крамера невозможен: det(A)=0")
     x = []
     steps = [f"det(A)={det_a:.6g}"]
     for col in range(n):
-        modified = _copy(a)
+        replaced = _copy(a)
         for row in range(n):
-            modified[row][col] = b[row]
-        det_i = determinant(modified).result
-        xi = det_i / det_a
-        x.append(xi)
-        steps.append(f"x{col+1} = det(A{col+1})/det(A) = {det_i:.6g}/{det_a:.6g} = {xi:.6g}")
+            replaced[row][col] = b[row]
+        det_i = determinant(replaced).result
+        x_i = det_i / det_a
+        x.append(x_i)
+        steps.append(f"det(A_{col+1})={det_i:.6g}; x{col+1}=det(A_{col+1})/det(A)={x_i:.6g}")
     return CalculationResult(steps=steps, result=x)
 
 
@@ -203,24 +254,54 @@ def solve_slae_gauss(a: Matrix, b: Vector) -> CalculationResult:
     n, m = _shape(a)
     if len(b) != n:
         raise MatrixError("Размер вектора b не совпадает с числом строк матрицы")
+    mat = [a[i][:] + [b[i]] for i in range(n)]
+    steps = ["Формируем расширенную матрицу [A|b]"]
+    row = 0
+    pivots = []
+    for col in range(m):
+        pivot = max(range(row, n), key=lambda r: abs(mat[r][col])) if row < n else row
+        if row >= n or abs(mat[pivot][col]) < 1e-12:
+            continue
+        mat[row], mat[pivot] = mat[pivot], mat[row]
+        pivot_val = mat[row][col]
+        for j in range(col, m + 1):
+            mat[row][j] /= pivot_val
+        for i in range(n):
+            if i != row and abs(mat[i][col]) > 1e-12:
+                factor = mat[i][col]
+                for j in range(col, m + 1):
+                    mat[i][j] -= factor * mat[row][j]
+        pivots.append((row, col))
+        steps.append(f"Ведущий элемент в столбце {col+1}; нормируем строку {row+1}")
+        row += 1
+    for i in range(n):
+        if all(abs(mat[i][j]) < 1e-12 for j in range(m)) and abs(mat[i][m]) > 1e-12:
+            raise MatrixError("Система несовместна")
+    if len(pivots) < m:
+        raise MatrixError("Система имеет бесконечно много решений; единственное решение не найдено")
+    x = [0.0 for _ in range(m)]
+    for pivot_row, pivot_col in pivots:
+        x[pivot_col] = mat[pivot_row][m]
+    steps.append("Считываем решение из приведённой матрицы")
+    return CalculationResult(steps=steps, result=x)
+
+
+def _inverse(a: Matrix) -> Matrix:
+    n, m = _shape(a)
     if n != m:
-        raise MatrixError("Для первой контрольной точки поддерживается квадратная СЛАУ")
-    mat = [row[:] + [b[i]] for i, row in enumerate(_copy(a))]
-    steps = ["Прямой ход метода Гаусса"]
+        raise MatrixError("Обратная матрица существует только для квадратной")
+    mat = [a[i][:] + [1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
     for col in range(n):
         pivot = max(range(col, n), key=lambda r: abs(mat[r][col]))
         if abs(mat[pivot][col]) < 1e-12:
-            raise MatrixError("Система не имеет единственного решения")
+            raise MatrixError("Матрица вырожденная, обратной матрицы нет")
         mat[col], mat[pivot] = mat[pivot], mat[col]
-        steps.append(f"Опорный элемент в столбце {col+1}: строка {pivot+1}")
-        for row in range(col + 1, n):
-            factor = mat[row][col] / mat[col][col]
-            for k in range(col, n + 1):
-                mat[row][k] -= factor * mat[col][k]
-    x = [0.0] * n
-    steps.append("Обратный ход")
-    for i in range(n - 1, -1, -1):
-        rhs = mat[i][n] - sum(mat[i][j] * x[j] for j in range(i + 1, n))
-        x[i] = rhs / mat[i][i]
-        steps.append(f"x{i+1} = {x[i]:.6g}")
-    return CalculationResult(steps=steps, result=x)
+        pivot_val = mat[col][col]
+        for j in range(2 * n):
+            mat[col][j] /= pivot_val
+        for i in range(n):
+            if i != col:
+                factor = mat[i][col]
+                for j in range(2 * n):
+                    mat[i][j] -= factor * mat[col][j]
+    return [row[n:] for row in mat]
